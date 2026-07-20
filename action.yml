@@ -62,7 +62,7 @@ outputs:
   inactive-count:
     description: 'Total inactive members in the org-wide report.'
   issue-url:
-    description: 'URL of the org-wide report issue (empty in dry-run).'
+    description: 'URL of the org-wide report issue (empty when no inactive members are found or in dry-run).'
 
 runs:
   using: 'node20'

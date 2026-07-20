@@ -158,9 +158,68 @@ describe('run', () => {
 
 		await run();
 
-		expect(issueModule.upsertIssue).toHaveBeenCalledTimes(2);
+		expect(issueModule.upsertIssue).toHaveBeenCalledTimes(1);
 		const callRepos = vi.mocked(issueModule.upsertIssue).mock.calls.map((c) => c[1].repo);
-		expect(callRepos).toEqual(['audits', 'infra-board']);
+		expect(callRepos).toEqual(['audits']);
+	});
+
+	it('does not create or update an org issue when no inactive users are found', async () => {
+		vi.mocked(inputsModule.parseInputs).mockReturnValue(cfg());
+		vi.mocked(orgModule.auditOrg).mockResolvedValue({
+			...orgResult,
+			inactive: [],
+			noActivityCount: 0,
+		});
+
+		await run();
+
+		expect(issueModule.upsertIssue).not.toHaveBeenCalled();
+		expect(core.setOutput).toHaveBeenCalledWith('inactive-count', '0');
+		expect(core.setOutput).toHaveBeenCalledWith('issue-url', '');
+		expect(core.info).toHaveBeenCalledWith(
+			'no inactive users found for organization acme; skipping issue publication',
+		);
+	});
+
+	it('publishes only team reports that contain inactive users', async () => {
+		vi.mocked(inputsModule.parseInputs).mockReturnValue(cfg());
+		vi.mocked(orgModule.auditOrg).mockResolvedValue({
+			...orgResult,
+			inactive: [],
+			noActivityCount: 0,
+		});
+		vi.mocked(teamsModule.buildTeamMap).mockResolvedValue({
+			membership: new Map(),
+			reportRepos: new Map([
+				['active-team', { owner: 'acme', repo: 'active-board' }],
+				['inactive-team', { owner: 'acme', repo: 'inactive-board' }],
+			]),
+		});
+		const result = (
+			slug: string,
+			repo: string,
+			inactive: TeamAuditResult['inactive'],
+		): TeamAuditResult => ({
+			slug,
+			reportRepo: { owner: 'acme', repo },
+			totalAudited: 2,
+			inactive,
+			auditedRepos: ['acme/r1'],
+			errors: [],
+			runAt: '2026-04-26T00:00:00Z',
+		});
+		vi.mocked(teamModule.auditTeams).mockResolvedValue([
+			result('active-team', 'active-board', []),
+			result('inactive-team', 'inactive-board', [
+				{ login: 'bob', reason: 'no-activity', teams: ['inactive-team'], lastSeen: null },
+			]),
+		]);
+
+		await run();
+
+		const callRepos = vi.mocked(issueModule.upsertIssue).mock.calls.map((call) => call[1].repo);
+		expect(callRepos).toEqual(['inactive-board']);
+		expect(core.setOutput).toHaveBeenCalledWith('issue-url', '');
 	});
 
 	it('passes dryRun through to upsertIssue', async () => {

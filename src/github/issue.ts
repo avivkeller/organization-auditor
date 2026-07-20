@@ -8,17 +8,40 @@ export interface UpsertParams {
 	readonly body: string;
 	readonly labels: readonly string[];
 	readonly dryRun: boolean;
-	readonly runAt: string;
 }
 
 export interface UpsertResult {
 	readonly url: string;
 	readonly number: number | null;
-	readonly action: 'created' | 'updated' | 'dry-run';
+	readonly action: 'created' | 'updated' | 'unchanged' | 'dry-run';
 }
 
-// Idempotency contract: the open issue carrying both labels is THE audit issue
-// for this scope. Title is unreliable (humans rename), labels are the contract.
+interface Issue {
+	readonly number: number;
+	readonly html_url: string;
+	readonly updated_at: string;
+	readonly body: string | null;
+	readonly pull_request?: object;
+}
+
+function selectMostRecentIssue(candidates: readonly Issue[]): {
+	readonly target: Issue | undefined;
+	readonly matchCount: number;
+} {
+	let target: Issue | undefined;
+	let matchCount = 0;
+
+	for (const candidate of candidates) {
+		if (candidate.pull_request) continue;
+		matchCount++;
+		if (!target || candidate.updated_at > target.updated_at) target = candidate;
+	}
+
+	return { target, matchCount };
+}
+
+// The labels identify the report issue because its title may be edited by a
+// maintainer. Only the issue body is managed; existing comments are untouched.
 export async function upsertIssue(octokit: Octokit, params: UpsertParams): Promise<UpsertResult> {
 	if (params.dryRun) {
 		core.info(`[dry-run] would file issue in ${params.owner}/${params.repo}`);
@@ -28,15 +51,16 @@ export async function upsertIssue(octokit: Octokit, params: UpsertParams): Promi
 		return { url: '', number: null, action: 'dry-run' };
 	}
 
-	const { data: existing } = await octokit.request('GET /repos/{owner}/{repo}/issues', {
+	const candidates = (await octokit.paginate('GET /repos/{owner}/{repo}/issues', {
 		owner: params.owner,
 		repo: params.repo,
 		state: 'open',
 		labels: params.labels.join(','),
-		per_page: 1,
-	});
+		per_page: 100,
+	})) as Issue[];
+	const { target, matchCount } = selectMostRecentIssue(candidates);
 
-	if (existing.length === 0) {
+	if (!target) {
 		const { data } = await octokit.request('POST /repos/{owner}/{repo}/issues', {
 			owner: params.owner,
 			repo: params.repo,
@@ -48,13 +72,24 @@ export async function upsertIssue(octokit: Octokit, params: UpsertParams): Promi
 		return { url: data.html_url, number: data.number, action: 'created' };
 	}
 
+	if (matchCount > 1) {
+		core.warning(
+			`found ${matchCount} open audit issues in ${params.owner}/${params.repo}; updating the most recent`,
+		);
+	}
+
+	if (target.body === params.body) {
+		core.info(`unchanged issue #${target.number} in ${params.owner}/${params.repo}`);
+		return { url: target.html_url, number: target.number, action: 'unchanged' };
+	}
+
 	await octokit.request('PATCH /repos/{owner}/{repo}/issues/{issue_number}', {
 		owner: params.owner,
 		repo: params.repo,
-		issue_number: existing[0].number,
+		issue_number: target.number,
 		body: params.body,
 	});
 
-	core.info(`updated issue #${existing[0].number} in ${params.owner}/${params.repo}`);
-	return { url: existing[0].html_url, number: existing[0].number, action: 'updated' };
+	core.info(`updated issue #${target.number} in ${params.owner}/${params.repo}`);
+	return { url: target.html_url, number: target.number, action: 'updated' };
 }

@@ -58843,6 +58843,19 @@ async function auditTeams(cache, discovery, cacheData) {
 
 //#endregion
 //#region src/github/issue.ts
+function selectMostRecentIssue(candidates) {
+	let target;
+	let matchCount = 0;
+	for (const candidate of candidates) {
+		if (candidate.pull_request) continue;
+		matchCount++;
+		if (!target || candidate.updated_at > target.updated_at) target = candidate;
+	}
+	return {
+		target,
+		matchCount
+	};
+}
 async function upsertIssue(octokit, params) {
 	if (params.dryRun) {
 		info(`[dry-run] would file issue in ${params.owner}/${params.repo}`);
@@ -58855,14 +58868,14 @@ async function upsertIssue(octokit, params) {
 			action: "dry-run"
 		};
 	}
-	const { data: existing } = await octokit.request("GET /repos/{owner}/{repo}/issues", {
+	const { target, matchCount } = selectMostRecentIssue(await octokit.paginate("GET /repos/{owner}/{repo}/issues", {
 		owner: params.owner,
 		repo: params.repo,
 		state: "open",
 		labels: params.labels.join(","),
-		per_page: 1
-	});
-	if (existing.length === 0) {
+		per_page: 100
+	}));
+	if (!target) {
 		const { data } = await octokit.request("POST /repos/{owner}/{repo}/issues", {
 			owner: params.owner,
 			repo: params.repo,
@@ -58877,16 +58890,25 @@ async function upsertIssue(octokit, params) {
 			action: "created"
 		};
 	}
+	if (matchCount > 1) warning(`found ${matchCount} open audit issues in ${params.owner}/${params.repo}; updating the most recent`);
+	if (target.body === params.body) {
+		info(`unchanged issue #${target.number} in ${params.owner}/${params.repo}`);
+		return {
+			url: target.html_url,
+			number: target.number,
+			action: "unchanged"
+		};
+	}
 	await octokit.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", {
 		owner: params.owner,
 		repo: params.repo,
-		issue_number: existing[0].number,
+		issue_number: target.number,
 		body: params.body
 	});
-	info(`updated issue #${existing[0].number} in ${params.owner}/${params.repo}`);
+	info(`updated issue #${target.number} in ${params.owner}/${params.repo}`);
 	return {
-		url: existing[0].html_url,
-		number: existing[0].number,
+		url: target.html_url,
+		number: target.number,
 		action: "updated"
 	};
 }
@@ -63720,6 +63742,20 @@ function renderTeamReport(result, cfg) {
 
 //#endregion
 //#region src/main.ts
+async function publishFindings(octokit, cfg, publication) {
+	if (publication.inactiveCount === 0) {
+		info(`no inactive users found for ${publication.scope}; skipping issue publication`);
+		return "";
+	}
+	const report = publication.render();
+	return (await upsertIssue(octokit, {
+		...publication.reportRepo,
+		title: report.title,
+		body: report.body,
+		labels: report.labels,
+		dryRun: cfg.dryRun
+	})).url;
+}
 async function run() {
 	const cfg = parseInputs();
 	info(`auditing ${cfg.org} (window: ${cfg.inactivityDays}d, dry-run: ${cfg.dryRun})`);
@@ -63731,36 +63767,26 @@ async function run() {
 	try {
 		const orgResult = await auditOrg(probeCache, discovery.membership, cacheData);
 		info(`org audit done: ${orgResult.inactive.length}/${orgResult.totalAudited} inactive, ${orgResult.errors.length} errors`);
-		const orgRendered = renderOrgReport(orgResult, cfg);
-		const orgIssue = await upsertIssue(octokit, {
-			owner: cfg.reportRepo.owner,
-			repo: cfg.reportRepo.repo,
-			title: orgRendered.title,
-			body: orgRendered.body,
-			labels: orgRendered.labels,
-			dryRun: cfg.dryRun,
-			runAt: cfg.now
-		});
 		setOutput("inactive-count", String(orgResult.inactive.length));
-		setOutput("issue-url", orgIssue.url);
+		const orgIssueUrl = await publishFindings(octokit, cfg, {
+			scope: `organization ${cfg.org}`,
+			reportRepo: cfg.reportRepo,
+			inactiveCount: orgResult.inactive.length,
+			render: () => renderOrgReport(orgResult, cfg)
+		});
+		setOutput("issue-url", orgIssueUrl);
 		if (discovery.reportRepos.size === 0) {
 			info("no teams advertise a `repo:` token in their description; skipping per-team audits");
 			return;
 		}
 		info(`running per-team audits for ${discovery.reportRepos.size} teams`);
 		const teamResults = await auditTeams(probeCache, discovery, cacheData);
-		for (const teamResult of teamResults) {
-			const rendered = renderTeamReport(teamResult, cfg);
-			await upsertIssue(octokit, {
-				owner: teamResult.reportRepo.owner,
-				repo: teamResult.reportRepo.repo,
-				title: rendered.title,
-				body: rendered.body,
-				labels: rendered.labels,
-				dryRun: cfg.dryRun,
-				runAt: cfg.now
-			});
-		}
+		for (const teamResult of teamResults) await publishFindings(octokit, cfg, {
+			scope: `team ${teamResult.slug}`,
+			reportRepo: teamResult.reportRepo,
+			inactiveCount: teamResult.inactive.length,
+			render: () => renderTeamReport(teamResult, cfg)
+		});
 	} finally {
 		await saveActivityCache(cfg.org, runMarker, cacheData);
 	}

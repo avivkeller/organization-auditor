@@ -7,7 +7,36 @@ import { buildTeamMap } from './github/teams.js';
 import { upsertIssue } from './github/issue.js';
 import { parseInputs } from './inputs.js';
 import { buildClient } from './octokit.js';
-import { renderOrgReport, renderTeamReport } from './report.js';
+import { renderOrgReport, renderTeamReport, type RenderedReport } from './report.js';
+import type { AuditConfig, Octokit } from './types.js';
+
+interface ReportPublication {
+	readonly scope: string;
+	readonly reportRepo: { readonly owner: string; readonly repo: string };
+	readonly inactiveCount: number;
+	readonly render: () => RenderedReport;
+}
+
+async function publishFindings(
+	octokit: Octokit,
+	cfg: AuditConfig,
+	publication: ReportPublication,
+): Promise<string> {
+	if (publication.inactiveCount === 0) {
+		core.info(`no inactive users found for ${publication.scope}; skipping issue publication`);
+		return '';
+	}
+
+	const report = publication.render();
+	const issue = await upsertIssue(octokit, {
+		...publication.reportRepo,
+		title: report.title,
+		body: report.body,
+		labels: report.labels,
+		dryRun: cfg.dryRun,
+	});
+	return issue.url;
+}
 
 export async function run(): Promise<void> {
 	const cfg = parseInputs();
@@ -35,18 +64,14 @@ export async function run(): Promise<void> {
 			`org audit done: ${orgResult.inactive.length}/${orgResult.totalAudited} inactive, ${orgResult.errors.length} errors`,
 		);
 
-		const orgRendered = renderOrgReport(orgResult, cfg);
-		const orgIssue = await upsertIssue(octokit, {
-			owner: cfg.reportRepo.owner,
-			repo: cfg.reportRepo.repo,
-			title: orgRendered.title,
-			body: orgRendered.body,
-			labels: orgRendered.labels,
-			dryRun: cfg.dryRun,
-			runAt: cfg.now,
-		});
 		core.setOutput('inactive-count', String(orgResult.inactive.length));
-		core.setOutput('issue-url', orgIssue.url);
+		const orgIssueUrl = await publishFindings(octokit, cfg, {
+			scope: `organization ${cfg.org}`,
+			reportRepo: cfg.reportRepo,
+			inactiveCount: orgResult.inactive.length,
+			render: () => renderOrgReport(orgResult, cfg),
+		});
+		core.setOutput('issue-url', orgIssueUrl);
 
 		if (discovery.reportRepos.size === 0) {
 			core.info(
@@ -58,15 +83,11 @@ export async function run(): Promise<void> {
 		core.info(`running per-team audits for ${discovery.reportRepos.size} teams`);
 		const teamResults = await auditTeams(probeCache, discovery, cacheData);
 		for (const teamResult of teamResults) {
-			const rendered = renderTeamReport(teamResult, cfg);
-			await upsertIssue(octokit, {
-				owner: teamResult.reportRepo.owner,
-				repo: teamResult.reportRepo.repo,
-				title: rendered.title,
-				body: rendered.body,
-				labels: rendered.labels,
-				dryRun: cfg.dryRun,
-				runAt: cfg.now,
+			await publishFindings(octokit, cfg, {
+				scope: `team ${teamResult.slug}`,
+				reportRepo: teamResult.reportRepo,
+				inactiveCount: teamResult.inactive.length,
+				render: () => renderTeamReport(teamResult, cfg),
 			});
 		}
 	} finally {

@@ -1,6 +1,6 @@
 # organization-auditor
 
-A GitHub Action that audits a GitHub organization for inactive members and files a tracking issue with the report. **Never removes anyone** - it only reports.
+A GitHub Action that audits a GitHub organization for inactive members and files a tracking issue when findings exist. **Never removes anyone** - it only reports.
 
 ## What "inactive" means
 
@@ -10,6 +10,10 @@ A member is **inactive** if **either**:
 2. They are not a member of any team.
 
 Per-team audits are opt-in **per team**, via the team's GitHub description: include a token of the form `repo: owner/board-repo` (or `repo: [owner/board-repo]`) anywhere in the description, and the action will audit that team and file its report issue in the named repo. Teams without the token are skipped. A team member is inactive in this audit if they have had no interaction with any of the team's repositories in the window.
+
+## Reporting behavior
+
+Reports are published only when inactive users are found. In that case, each organization or team audit owns one open tracking issue identified by its audit labels, and subsequent runs update that issue's body in place. A clean audit does not look up, create, update, or close an issue. The action never creates or edits issue comments, and it also skips the write when a generated body has not changed.
 
 ## Usage
 
@@ -64,10 +68,10 @@ A **fine-grained PAT** owned by an org admin or a **GitHub App installation toke
 
 ## Outputs
 
-| Output           | Description                                          |
-| ---------------- | ---------------------------------------------------- |
-| `inactive-count` | Total inactive members in the org-wide report.       |
-| `issue-url`      | URL of the org-wide report issue (empty in dry-run). |
+| Output           | Description                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| `inactive-count` | Total inactive members in the org-wide report.                                             |
+| `issue-url`      | URL of the org-wide report issue (empty when no inactive members are found or in dry-run). |
 
 ## Caching
 
